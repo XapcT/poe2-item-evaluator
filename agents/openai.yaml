@@ -1,0 +1,4 @@
+interface:
+  display_name: "PoE2 Item Evaluator"
+  short_description: "Evaluate PoE2 items with target-skill PoB and account context"
+  default_prompt: "Use $poe2-item-evaluator to choose my target skill, compare this item against my current PoE2 build, or find trade upgrades with DPS and stat deltas."
