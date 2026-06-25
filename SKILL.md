@@ -22,10 +22,12 @@ Default paths on this machine:
 
 - Workspace: `D:\Soft\PoE2_Build`
 - Working PoB2 install: `D:\Soft\PathOfBuilding-PoE2`
+- Bootstrap cache for portable installs: `%LOCALAPPDATA%\Codex\poe2-item-evaluator\PathOfBuilding-PoE2`
 - Authoritative BuildPlanner folder: `C:\Users\Hatzy\Documents\My Games\Path of Exile 2\BuildPlanner`
 - Mirror BuildPlanner folder: `C:\Users\Hatzy\OneDrive\Документы\My Games\Path of Exile 2\BuildPlanner`
 
 Run `scripts/collect_context.py` first for real paths, versions, and current files.
+If PoB2 is missing or the headless adapter is not present, run `scripts/bootstrap_pob2.py --json` to locate PoB2, `scripts/bootstrap_pob2.py --prepare-headless --json` to patch an existing local runtime, or `scripts/bootstrap_pob2.py --install --json` to download PoB2 into the cache and apply the headless adapter. Do not vendor the full PoB2 runtime into the skill repo.
 
 ## Workflow
 
@@ -61,9 +63,10 @@ Run `scripts/collect_context.py` first for real paths, versions, and current fil
 
 5. For exact effect, use PoB2:
    - First try the local headless PoB calculator when a current `pathOfBuildingExport` XML and candidate item text are available:
+     - Resolve the runtime with `scripts/bootstrap_pob2.py --json`. If `headlessReady` is false, run `scripts/bootstrap_pob2.py --prepare-headless --json`; if no runtime exists, run `scripts/bootstrap_pob2.py --install --json`.
      - Decode the current `pathOfBuildingExport` into a temporary XML.
      - Build a JSON config with the target name, XML path, and candidate copied-item text.
-     - Run the workspace PoB copy with `POB_HEADLESS_CALC_CONFIG` and `POB_HEADLESS_CALC_OUT` against `D:\Soft\PoE2_Build\pob2_v0.21.1_extract\Path of Building-PoE2.exe`.
+     - Run the resolved `pobExe` with `POB_HEADLESS_CALC_CONFIG` and `POB_HEADLESS_CALC_OUT`.
      - Accept the result only if the baseline selected-skill DPS matches the saved/live baseline for the target skill. If the baseline differs, discard the run and use the UI workflow below.
      - For trade2 item JSON, remember that displayed explicit/implicit values are already final. Do not add catalyst scaling a second time when generating copied-item text for PoB.
    - Open `D:\Soft\PathOfBuilding-PoE2\Path of Building-PoE2.exe`.
@@ -106,6 +109,7 @@ Run `scripts/collect_context.py` first for real paths, versions, and current fil
 ## Scripts
 
 - `scripts/collect_context.py`: reports PoB install/version, BuildPlanner files, workspace summaries, candidate files, and current character snapshot availability.
+- `scripts/bootstrap_pob2.py`: locates an existing PoB2 runtime or downloads PathOfBuildingCommunity/PathOfBuilding-PoE2 into a local cache, then applies the bundled headless adapter from `assets/pob2-headless/`.
 - `scripts/poe_account_api.py`: safely reuses PoB OAuth credentials for account character and trade2 API calls without printing tokens.
   Use `trade-fetch --items-out <items.txt>` to convert fetched trade listings into copied-item text for `rank_items.py`.
 - `scripts/list_character_skills.py`: reads a saved character JSON and prints a numbered target-skill menu, including non-support skills nested inside totems/meta setups and trigger-like support skills.

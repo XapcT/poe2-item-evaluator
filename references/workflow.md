@@ -6,6 +6,8 @@ An exact answer means PoB2 calculated the item in the active build, with the cor
 
 When available, the local headless PoB calculator is an exact PoB path, not a heuristic, because it loads the current PoB XML/export and reads PoB calculation output. Use it only after verifying that the baseline selected-skill DPS matches the current saved/live baseline. If the baseline differs, the XML, target skill, or config is stale/wrong and the result must be discarded.
 
+The skill does not vendor the full PoB2 runtime. Use `scripts/bootstrap_pob2.py --json` to locate a runtime, `scripts/bootstrap_pob2.py --prepare-headless --json` to add the bundled headless adapter to an existing runtime, or `scripts/bootstrap_pob2.py --install --json` to download PathOfBuildingCommunity/PathOfBuilding-PoE2 into the local cache and prepare it.
+
 ## Target skill selection
 
 When damage matters, pick a target skill before searching or ranking:
@@ -42,9 +44,10 @@ For ring pairs or other simple equipped-item swaps, prefer the headless PoB path
 
 1. Decode the current `pathOfBuildingExport` to XML.
 2. Generate PoB-compatible copied item text for each candidate. If the source is trade2 JSON, use displayed final mod values and do not double-apply catalyst/quality scaling.
-3. Run the headless calculator through `pob2_v0.21.1_extract` with `POB_HEADLESS_CALC_CONFIG` and `POB_HEADLESS_CALC_OUT`.
-4. Confirm baseline target DPS equals the live/saved target DPS.
-5. Report `new / old - 1` for the target skill damage and the old/new values for the requested stats.
+3. Resolve the PoB2 runtime with `scripts/bootstrap_pob2.py --json`; prepare it with `--prepare-headless` or `--install` if `headlessReady` is false or no runtime exists.
+4. Run the resolved `pobExe` with `POB_HEADLESS_CALC_CONFIG` and `POB_HEADLESS_CALC_OUT`.
+5. Confirm baseline target DPS equals the live/saved target DPS.
+6. Report `new / old - 1` for the target skill damage and the old/new values for the requested stats.
 
 ## Candidate ranking
 
