@@ -41,6 +41,7 @@ WWW_BASE = "https://www.pathofexile.com"
 API_BASE = "https://api.pathofexile.com"
 USER_AGENT = "PathOfBuilding-PoE2 OAuth helper"
 SCOPES = ["account:profile", "account:leagues", "account:characters", "account:trade"]
+LISTED_STATUS_OPTIONS = {"securable", "available", "onlineleague", "online", "any", "preserve"}
 
 
 class ApiError(RuntimeError):
@@ -332,6 +333,15 @@ def write_trade_items_text(data: dict[str, Any], out_path: str | None) -> str | 
     return out_path
 
 
+def apply_listed_status(query: dict[str, Any], listed_status: str) -> str | None:
+    if listed_status == "preserve":
+        return (((query.get("query") or {}).get("status") or {}).get("option"))
+    query_body = query.setdefault("query", {})
+    status = query_body.setdefault("status", {})
+    status["option"] = listed_status
+    return listed_status
+
+
 def command_status(args: argparse.Namespace) -> int:
     settings_path = settings_path_from_args(args)
     accounts = load_accounts(settings_path)
@@ -480,6 +490,7 @@ def command_trade_search(args: argparse.Namespace) -> int:
     settings_path = settings_path_from_args(args)
     token, auth_info = ensure_token(settings_path)
     query = json.loads(Path(args.query).read_text(encoding="utf-8-sig"))
+    listed_status = apply_listed_status(query, args.listed)
     realm = urllib.parse.quote(args.realm, safe="")
     league = urllib.parse.quote(args.league, safe="")
     url = f"{WWW_BASE}/api/trade2/search/{realm}/{league}"
@@ -492,6 +503,7 @@ def command_trade_search(args: argparse.Namespace) -> int:
             "id": data.get("id"),
             "total": data.get("total"),
             "resultCount": len(data.get("result") or []),
+            "listedStatus": listed_status,
             "out": str(Path(args.out)) if args.out else None,
         }
     )
@@ -547,6 +559,12 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--realm", default="poe2")
     search.add_argument("--league", required=True)
     search.add_argument("--query", required=True, help="JSON query file")
+    search.add_argument(
+        "--listed",
+        default="securable",
+        choices=sorted(LISTED_STATUS_OPTIONS),
+        help="Trade listed status. Default securable means Instant Buyout; use preserve to keep the query file value.",
+    )
     search.add_argument("--out")
     search.set_defaults(func=command_trade_search)
 

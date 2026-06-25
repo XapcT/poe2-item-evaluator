@@ -63,10 +63,11 @@ For ring pairs or other simple equipped-item swaps, prefer the headless PoB path
 2. Select or confirm the target skill before building offensive weights.
 3. Use the current build's active item set and stat weights.
 4. For offensive searches, include the selected target skill's DPS or closest PoB damage field plus build-specific stats. For defensive searches, raise Effective Hit Pool and missing max-hit/resist stats.
-5. If shell access to trade2 is needed, try `scripts/poe_account_api.py trade-search` with a saved query JSON. It reuses PoB OAuth credentials and writes rotated refresh tokens back to PoB settings.
+5. Use instant-buyout-only listed status by default. In trade JSON this is `query.status.option = "securable"`; in PoB popups it is the `Instant Buyout` listed dropdown. Broaden to `available`, `online`, `onlineleague`, or `any` only if the user explicitly asks for non-instant-buyout listings, and label that result clearly.
+6. If shell access to trade2 is needed, try `scripts/poe_account_api.py trade-search` with a saved query JSON. It reuses PoB OAuth credentials, forces `--listed securable` by default, and writes rotated refresh tokens back to PoB settings.
    Use `trade-fetch --items-out <items.txt>` to create copied-item text from fetched trade results before running `rank_items.py`.
-6. If PoB is not authenticated, use the generated weighted trade URL and ask the user for candidate text or saved results.
-7. If authenticated, fetch in PoB Trader and sort by value/price only after PoB's build weight is known.
+7. If PoB is not authenticated, use the generated weighted trade URL and ask the user for candidate text or saved results.
+8. If authenticated, fetch in PoB Trader and sort by value/price only after PoB's build weight is known.
 
 ## Required result format for damage-affecting recommendations
 
@@ -76,7 +77,7 @@ Include:
 - Validation type: exact PoB or heuristic triage.
 - Target damage: always show this as its own visible block. For exact PoB results, include baseline, after, and `% change`. For script-only triage, write `Exact PoB DPS: not calculated`, omit any DPS percentage, and optionally include a clearly labelled heuristic/offensive-affix proxy that is not presented as DPS.
 - Character stats: baseline, after, and change for mana, life, ES, spirit, EHP, rarity, attributes, and resistances when available. For mana, include flat mana and `% increased maximum Mana` as inputs plus the final estimated or PoB-confirmed total; do not leave percentage mana only as a raw mod. For every listed stat, subtract the replaced item's contribution before adding the candidate item contribution, and label non-PoB results as estimates when global scaling may apply.
-- Trade links and price for each recommended item.
+- Trade links and price for each recommended item. Buy-ready links must be instant-buyout-only (`status.option = "securable"`) unless the user explicitly asked otherwise.
 
 ## Account-backed current data
 
