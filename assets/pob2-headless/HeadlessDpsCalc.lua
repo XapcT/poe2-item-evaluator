@@ -140,10 +140,21 @@ local result = {
 	xmlPath = config.xmlPath,
 	baseline = collectStats(baselineEntry:GetOutput()),
 	pairs = { },
+	xmlVariants = { },
 }
 
 for index, pair in ipairs(config.pairs or { }) do
 	result.pairs[index] = calcPair(xmlText, pair)
+end
+
+for index, variant in ipairs(config.xmlVariants or { }) do
+	local variantXml = readAll(variant.xmlPath)
+	local entry = makeEntry(variantXml, variant.name or ("variant " .. tostring(index)))
+	result.xmlVariants[index] = {
+		name = variant.name,
+		xmlPath = variant.xmlPath,
+		stats = collectStats(entry:GetOutput()),
+	}
 end
 
 writeAll(outPath, dkjson.encode(result, { indent = true }))

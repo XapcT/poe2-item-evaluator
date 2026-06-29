@@ -69,6 +69,53 @@ For ring pairs or other simple equipped-item swaps, prefer the headless PoB path
 7. If PoB is not authenticated, use the generated weighted trade URL and ask the user for candidate text or saved results.
 8. If authenticated, fetch in PoB Trader and sort by value/price only after PoB's build weight is known.
 
+## poe.ninja build discovery and respec planning
+
+Use this path when the user wants to find builds matching requirements, compare them to the current character, or plan a passive-tree/gear respec.
+
+1. Refresh the user's current context first. Prefer a live account character JSON for current gear and skills; use local summaries only as hints if the live snapshot is unavailable.
+2. Infer filters from the request and current snapshot:
+   - league slug, usually `runesofaldur`
+   - class/ascendancy, for example `Oracle`
+   - target skill and delivery context, for example `Grim Pillars via Spell Totem`
+   - hard constraints such as `--max-energyshield 0`, minimum mana, required keystones, must-keep uniques, budget, or resist caps
+3. If the target skill is unclear and damage matters, list skills with `list_character_skills.py` and ask the user to choose. Do not rank damage patterns against an unspecified skill.
+4. Run `scripts/poe_ninja_build_finder.py` to fetch the current poe.ninja snapshot, decode the binary search payload, fetch top matching character details, and produce a JSON report:
+
+```powershell
+python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_ninja_build_finder.py" --league runesofaldur --class-name Oracle --skill "Grim Pillars" --delivery "Spell Totem" --max-energyshield 0 --min-level 90 --sort mana --details 12 --current-character "<current>.json" --out "<report>.json" --save-dir "<refs-dir>" --decode-pob-xml
+```
+
+5. Inspect the report before recommending:
+   - `references`: strongest matching builds with mana, ES, EHP, skills, uniques, keystones, passive IDs, and poe.ninja source URLs
+   - `patterns.commonUniqueItems`: frequent gear changes; recommend only if the unique is missing, build-enabling, and compatible with the user's current constraints
+   - `patterns.commonKeystones`: likely build-defining keystones, such as Mind Over Matter or Eldritch Battery for mana builds
+   - `patterns.missingCommonPassiveIds`: candidate passive IDs to test, not final advice by themselves
+   - saved `.xml` files when `--decode-pob-xml` is used
+6. Build a small PoB validation queue. Usually test:
+   - current XML baseline
+   - current gear plus the most common missing mana keystones
+   - a conservative reference-tree variant that keeps required attributes/resists/spirit
+   - one or two higher-risk variants if the reference cluster clearly uses different uniques
+7. Validate through PoB2 before final recommendations. The headless adapter accepts `xmlVariants`:
+
+```json
+{
+  "target": "Grim Pillars via Spell Totem",
+  "xmlPath": "current.xml",
+  "xmlVariants": [
+    {"name": "current + EB/MoM core", "xmlPath": "variant-eb-mom.xml"},
+    {"name": "poe.ninja reference tree", "xmlPath": "reference-tree.xml"}
+  ]
+}
+```
+
+Use `bootstrap_pob2.py --json` first to confirm `headlessReady`. Run PoB with `POB_HEADLESS_CALC_CONFIG` and `POB_HEADLESS_CALC_OUT`, then accept only variants whose baseline target skill and config match the current build.
+8. Final recommendations must separate evidence levels:
+   - `poe.ninja pattern`: common among matching builds, not exact for the user
+   - `PoB2-confirmed`: exact target-skill DPS/stat result in the user's build
+   - `needs user decision`: expensive unique swaps, lost resists/attributes/spirit, or alternate target-skill assumptions
+
 ## Required result format for damage-affecting recommendations
 
 Include:

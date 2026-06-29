@@ -1,4 +1,4 @@
 interface:
   display_name: "PoE2 Item Evaluator"
-  short_description: "Evaluate PoE2 items with target-skill PoB and account context"
-  default_prompt: "Use $poe2-item-evaluator to choose my target skill, compare this item against my current PoE2 build, or find trade upgrades with DPS and stat deltas."
+  short_description: "Evaluate PoE2 items, stash tabs, and PoB respecs"
+  default_prompt: "Use $poe2-item-evaluator to compare PoE2 items, price-check a marked public stash tab, find trade upgrades, or plan a poe.ninja-informed respec with PoB2-checked DPS and stat deltas."

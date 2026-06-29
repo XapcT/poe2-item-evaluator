@@ -1,6 +1,6 @@
 ---
 name: poe2-item-evaluator
-description: Evaluate Path of Exile 2 items and find upgrade analogs for the user's local builds using Path of Building 2 context, copied item text, saved trade candidates, poe.ninja snapshots, authenticated PoE account/trade API access via local PoB OAuth credentials, and the local Windows PoB/BuildPlanner setup. Use when the user asks whether a PoE2 item is better, wants a ranking of candidate items, wants suitable analogs/upgrades, wants PoB trade weights, wants current account character data, asks to compare gear against their current build, or needs target-skill DPS percent deltas after choosing a character skill.
+description: Evaluate Path of Exile 2 items, find upgrade analogs, price-check marked public stash tabs, and plan respec/build changes using Path of Building 2 context, copied item text, saved trade candidates, poe.ninja build snapshots, authenticated PoE account/trade API access via local PoB OAuth credentials, and the local Windows PoB/BuildPlanner setup. Use when the user asks whether a PoE2 item is better, wants candidate item ranking, suitable analogs/upgrades, stash-tab price checking, PoB trade weights, current account character data, target-skill DPS deltas, poe.ninja build/reference discovery, similar-build analysis, mana/damage respec planning, or passive-tree/gear recommendations that must be checked through PoB2.
 ---
 
 # PoE2 Item Evaluator
@@ -42,6 +42,8 @@ If PoB2 is missing or the headless adapter is not present, run `scripts/bootstra
    - Single item check: user provides copied item text or a screenshot/transcription.
    - Candidate ranking: user provides multiple copied items, saved trade text/HTML-derived candidates, or JSON candidates.
    - Analog search: use PoB Trader weighted search first; use scripts to triage candidate text after fetching/saving results.
+   - Marked stash-tab price check: user puts items into a public tab, gives an account, stash name, and fixed marker price such as `~price 1 mirror`; use trade2 fetch plus local stash filtering and market-floor checks.
+   - Build/respec planning: use poe.ninja build discovery to find matching reference builds, compare their gear/passives/keystones against the user's current snapshot, then verify candidate gear/tree variants through PoB2 before final recommendations.
 
 3. Choose the target skill when damage matters:
    - Fetch the current character if needed:
@@ -91,7 +93,73 @@ If PoB2 is missing or the headless adapter is not present, run `scripts/bootstra
    - For 2-5 recommended trade options, prefer compact per-option blocks over wide markdown tables. Each block should put the recommendation name, price, damage delta/proxy, key stat deltas, and trade links together so the user can read and act on one option without scanning across columns.
    - Trade links for rare items must use the full rare name plus base type whenever possible, for example `Hate Knuckle Mnemonic Ring`, not just `Hate Knuckle`. For buy-ready recommendations of a specific listing, include the seller account filter too: `term = "<rare name> <base type>"`, `type = "<base type>"`, `query.status.option = "securable"`, and `trade_filters.account.input = "<seller account>"`. Add key-mod minimum filters only when their stat ids are verified from the item JSON; guessed stat ids can hide the intended item. Verify the search result count and that the original item id is present. Prefer links that return exactly the intended listing; if the seller-filtered link returns 0 or many irrelevant items, include the seller/whisper text and do not present the link as buy-ready.
 
-7. For current account data or authenticated trade access, use the PoB OAuth helper:
+7. For marked public stash-tab price checks:
+   - Use this workflow when the user wants to evaluate many items from their stash without visual OCR. Ask them to make the tab public and give every item a distinctive fixed marker price, for example `~price 1 mirror`, then provide the account name such as `XapcT#1700`, league, and tab name. The tab name can be Russian or English; it is filtered locally after fetch.
+   - This workflow is a deliberate exception to the instant-buyout default. Use ordinary player-trade statuses such as `online` or `any`, not `securable`, because the marker listing itself is not a buy-ready upgrade search.
+   - Run the bundled script:
+     ```powershell
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_pricecheck.py" --account "XapcT#1700" --league "Runes of Aldur" --stash-name "~price 1 mirror" --marker-currency mirror --marker-amount 1 --threshold-exalted 10 --out-dir "D:\Soft\PoE2_Build"
+     ```
+     This searches account+marker price, unions multiple sorts to work around the 100-result cap, fetches full item JSON, filters by `listing.stash.name`, builds a local shortlist from explicit stat ids and values, then runs a small number of ordinary `online` market-floor checks.
+   - If a full fetch JSON already exists, avoid another account search and reuse it:
+     ```powershell
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_pricecheck.py" --input "D:\Soft\PoE2_Build\poe_stash_pricecheck_fetch_price_1_mirror.json" --account "XapcT#1700" --threshold-exalted 10 --out-dir "D:\Soft\PoE2_Build"
+     ```
+   - Report only items with a fetched external floor above the requested threshold as confirmed. Put the stash coordinates first: `x/y` are trade2's zero-based stash coordinates; `column/row` in the JSON are one-based for in-game navigation. Include the market-floor price, trade URL, and key mods. Put items with no analogs, invalid stat filters, or exhausted query budget into an `uncertain` bucket instead of calling them expensive.
+   - Explain setup to the user as: create a public stash tab, place items there, set every item to a unique high marker such as `~price 1 mirror`, tell Codex the account, league, stash name, threshold, and whether to use `online`, `any`, or `available`. Warn that the items are publicly visible at the marker price and may receive whispers.
+   - After a stash evaluation, optionally show prices directly over the stash grid with the local overlay helper. It reads saved report JSON and draws click-through labels at the fetched stash coordinates:
+     ```powershell
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay.py" --latest --min-price-exalted 10 --window-title "Path of Exile"
+     ```
+     If the final answer adjusts raw market floors manually, save a curated `overlay_prices.json` in the evaluation directory and include rows such as `{"marker":"marker2","x":2,"y":0,"text":"2div","priceExalted":210,"labelRu":"..."}`. When `overlay_prices.json` exists, `--latest` uses it instead of raw report floors. Use `--marker marker1` or `--marker marker2` when only one marked tab is open.
+     To switch and hide automatically while the user changes stash tabs, keep the marker tabs visible in the tab strip and run:
+     ```powershell
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay.py" --latest --auto-marker --tab-marker marker2 --tab-marker marker1
+     ```
+     Auto-marker mode watches the tab-strip colors in the saved profile's `tabScan*` region, treats the brighter wide gold tab as active, maps visible marker tabs left-to-right to the given `--tab-marker` order, and hides all labels when neither marked tab is active. If a marked tab is active but has no saved labels above the threshold, it shows a small empty-state label such as `1 mirror: 0 >= 10ex`; pass `--no-empty-status` to hide even that.
+     Prefer the manager tool for user-facing activation, calibration, stopping, and autostart:
+     ```powershell
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay_manager.py" calibrate
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay_manager.py" start
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay_manager.py" stop
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay_manager.py" enable-autostart --start-now
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay_manager.py" disable-autostart --stop-running
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay_manager.py" status
+     ```
+     `calibrate` opens a non-click-through overlay with the stash grid, a visible `СЕТКА` handle for moving the grid, the blue tab-scan rectangle, detected marker-tab boxes, and on-screen buttons. Prefer mouse controls because the game can steal keyboard focus: drag the `СЕТКА` handle to move the grid, drag the blue tab-scan rectangle to move the tab detector, use `+`/`-` buttons to change cell size, `Сброс` to restore the default calibration, and `Готово` to save and close. Double `Enter` also saves and closes when the overlay has focus. Keyboard fallbacks still exist: `Tab`/`G`/`T` switch selected area, arrows move it, `Ctrl+arrows` resize tab-scan, `S` saves, and `Esc` closes. This calibration should be offered before first overlay use, after monitor/UI scaling changes, or when labels do not align.
+     `start` is a one-time overlay launch. `enable-autostart --start-now` writes a per-agent `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` entry named from `CODEX_THREAD_ID` or `--agent-id`, starts the overlay, waits for the game window, follows it if it moves, and closes the overlay when the game closes. Different Codex agents should keep different `--agent-id` values so they do not overwrite each other's Run entries. `disable-autostart --stop-running` removes only that agent's Run entry and stops only that agent's overlay process.
+     After each stash evaluation that produces or updates `overlay_prices.json`, ask the user which overlay action they want unless they already requested one: calibrate first, start once, enable permanent autostart, stop/disable, or leave it off.
+     If the manager is not available, the direct fallback calibration command is:
+     ```powershell
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay.py" --latest --auto-marker --tab-marker marker2 --tab-marker marker1 --calibrate --show-grid --show-tab-scan --no-click-through --window-title "Path of Exile"
+     ```
+     The overlay works best in windowed or borderless fullscreen mode; exclusive fullscreen can hide normal Windows overlays.
+
+8. For poe.ninja build discovery and respec planning:
+   - Read `references/workflow.md` if the task asks to compare builds, plan a respec, copy poe.ninja patterns, or optimize passive trees.
+   - Start from the user's current snapshot when available. If not, fetch the current account character with `poe_account_api.py character` or use an explicit poe.ninja character URL.
+   - Infer safe filters from the request and snapshot: league, class/ascendancy, target skill, delivery skill such as `Spell Totem`, minimum level, mana/ES constraints, required keystones, and known must-keep items. If damage matters and the target skill is not clear, list skills and ask for the target before ranking.
+   - Run the build finder. Example for an Oracle mana Grim Pillars totem search:
+     ```powershell
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_ninja_build_finder.py" --league runesofaldur --class-name Oracle --skill "Grim Pillars" --delivery "Spell Totem" --max-energyshield 0 --min-level 90 --sort mana --details 12 --current-character "<current>.json" --out "<report>.json" --save-dir "<refs-dir>" --decode-pob-xml
+     ```
+     This fetches the current poe.ninja snapshot, decodes the binary search result, downloads top character JSON details, compares common unique items/keystones/passive IDs against the current snapshot, and saves PoB exports/XML when requested.
+   - Treat the build finder as discovery and pattern extraction. It is not exact PoB optimization by itself.
+   - Before final recommendations, build a small set of PoB XML variants: current tree baseline, reference tree transplant if feasible, current tree plus common missing keystones, and 2-4 conservative variants that keep required gear/attributes/resists. Use the headless PoB adapter or PoB UI to validate target skill DPS, mana, EHP, max hits, spirit, attributes, and resistances.
+   - The headless adapter supports `xmlVariants` in addition to ring `pairs`. A config can include:
+     ```json
+     {
+       "target": "Grim Pillars via Spell Totem",
+       "xmlPath": "current.xml",
+       "xmlVariants": [
+         {"name": "poe.ninja mana core", "xmlPath": "variant.xml"}
+       ]
+     }
+     ```
+     Run it through the existing `POB_HEADLESS_CALC_CONFIG` / `POB_HEADLESS_CALC_OUT` flow after confirming `bootstrap_pob2.py --json` reports `headlessReady: true`.
+   - In the final answer, separate `poe.ninja pattern` from `PoB2-confirmed recommendation`. Do not recommend a respec tree as optimal until the exact PoB run confirms the requested objective, such as maximum mana plus target-skill damage.
+
+9. For current account data or authenticated trade access, use the PoB OAuth helper:
    ```powershell
    python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_account_api.py" status
    python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_account_api.py" authorize
@@ -116,5 +184,9 @@ If PoB2 is missing or the headless adapter is not present, run `scripts/bootstra
   `trade-search` forces `--listed securable` by default so searches are instant-buyout-only; use `--listed preserve` only when the user explicitly asks to keep another listed status. Use `trade-fetch --items-out <items.txt>` to convert fetched trade listings into copied-item text for `rank_items.py`.
 - `scripts/list_character_skills.py`: reads a saved character JSON and prints a numbered target-skill menu, including non-support skills nested inside totems/meta setups and trigger-like support skills.
 - `scripts/rank_items.py`: parses copied PoE2 item text and ranks items with a transparent heuristic profile. Use for triage only.
+- `scripts/poe_stash_pricecheck.py`: fetches a marked public stash tab by account+marker price, filters by stash name, triages likely valuable items, and runs low-volume ordinary trade market-floor checks for a price threshold.
+- `scripts/poe_stash_overlay.py`: reads saved stash price-check reports and draws a transparent, optionally click-through Windows overlay with compact price labels over the 12x12 stash grid. It also supports grid and tab-scan calibration; use the manager for normal activation.
+- `scripts/poe_stash_overlay_manager.py`: user-facing overlay manager for calibration, one-time start, stop, status, and per-agent Windows autostart. Prefer this over direct overlay commands after stash evaluations.
+- `scripts/poe_ninja_build_finder.py`: decodes live poe.ninja PoE2 build search results, fetches matching character details, extracts common gear/keystone/passive patterns, compares them to a current character snapshot, and saves reference PoB exports/XML for exact PoB2 validation.
 
 Read `references/workflow.md` if the task involves exact PoB validation, analog search, or explaining limitations.
