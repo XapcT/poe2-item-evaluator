@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -35,7 +36,7 @@ DEFAULT_TAB_SCAN_TOP = 120
 DEFAULT_TAB_SCAN_WIDTH = 900
 DEFAULT_TAB_SCAN_HEIGHT = 55
 TRANSPARENT_COLOR = "#ff00ff"
-SLOT_GUARD_STATE_VERSION = 2
+SLOT_GUARD_STATE_VERSION = 3
 SLOT_SAMPLE_POINTS = (
     (0.25, 0.38),
     (0.50, 0.38),
@@ -863,6 +864,26 @@ def capture_grid_pixels(
     return capture_screen_region(window_left + left, window_top + top, width, height)
 
 
+def stop_other_overlay_processes() -> None:
+    if os.name != "nt":
+        return
+    current_pid = os.getpid()
+    command = (
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { ($_.Name -like 'python*') -and ($_.CommandLine -like '*poe_stash_overlay.py*') "
+        f"-and ($_.ProcessId -ne {current_pid}) }} | "
+        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
+    )
+    creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    subprocess.run(
+        ["powershell", "-NoProfile", "-Command", command],
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+    )
+
+
 def sample_slot_fingerprint(
     entry: OverlayEntry,
     width: int,
@@ -886,6 +907,33 @@ def sample_slot_fingerprint(
     if len(samples) < args.slot_guard_min_samples:
         return None
     return tuple(samples)
+
+
+def slot_fingerprint_looks_empty(
+    current: tuple[tuple[int, int, int], ...],
+    args: argparse.Namespace,
+) -> bool:
+    if not current:
+        return False
+    lumas: list[float] = []
+    saturations: list[int] = []
+    colored_samples = 0
+    for rgb in current:
+        luma = sum(rgb) / 3.0
+        saturation = max(rgb) - min(rgb)
+        lumas.append(luma)
+        saturations.append(saturation)
+        if saturation >= args.slot_guard_empty_colored_threshold:
+            colored_samples += 1
+    avg_luma = sum(lumas) / len(lumas)
+    max_luma = max(lumas)
+    avg_saturation = sum(saturations) / len(saturations)
+    return (
+        avg_luma <= args.slot_guard_empty_avg_luma
+        and max_luma <= args.slot_guard_empty_max_luma
+        and avg_saturation <= args.slot_guard_empty_avg_saturation
+        and colored_samples <= args.slot_guard_empty_max_colored_samples
+    )
 
 
 def slot_fingerprint_changed(
@@ -1247,12 +1295,16 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
             return
         width, height, raw_bgra = capture
         state_changed = False
+        empty_candidates: list[OverlayEntry] = []
         stale_candidates: list[OverlayEntry] = []
         for entry in display_entries:
             if entry.key in slot_guard_stale_keys:
                 continue
             current = sample_slot_fingerprint(entry, width, height, raw_bgra, profile, args)
             if current is None:
+                continue
+            if slot_fingerprint_looks_empty(current, args):
+                empty_candidates.append(entry)
                 continue
             baseline = slot_guard_baselines.get(entry.key)
             if baseline is None:
@@ -1261,6 +1313,12 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
                 continue
             if slot_fingerprint_changed(baseline, current, args):
                 stale_candidates.append(entry)
+        for entry in empty_candidates:
+            slot_guard_stale_keys.add(entry.key)
+            slot_guard_baselines.pop(entry.key, None)
+            state_changed = True
+            if args.debug_slot_guard:
+                print(f"slotGuard=empty key={entry.key} text={entry.text}", file=sys.stderr)
         if stale_candidates:
             max_mass_changes = max(
                 args.slot_guard_mass_change_min,
@@ -1280,7 +1338,7 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
                         print(f"slotGuard=stale key={entry.key} text={entry.text}", file=sys.stderr)
         if state_changed:
             save_slot_guard_state(args, slot_guard_report_signature, slot_guard_baselines, slot_guard_stale_keys)
-        if stale_candidates and state_changed:
+        if (empty_candidates or stale_candidates) and state_changed:
             active_marker = None if current_marker in {"__unset__", "__all__"} else current_marker
             update_display_entries(active_marker, force=True)
 
@@ -1534,7 +1592,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tab-active-min-ratio", type=float, default=0.72)
     parser.add_argument("--tab-poll-ms", type=int, default=500)
     parser.add_argument("--debug-tabs", action="store_true")
-    parser.add_argument("--slot-guard", action="store_true", help="Hide labels when sampled slot pixels change after the overlay captures a baseline.")
+    parser.add_argument("--slot-guard", action="store_true", default=None, help="Hide labels when sampled slot pixels change after the overlay captures a baseline. Defaults to on with --auto-marker.")
+    parser.add_argument("--no-slot-guard", action="store_false", dest="slot_guard")
     parser.add_argument("--slot-guard-state", type=Path, help="Persistent slot-guard state file. Defaults to <search-root>/poe_stash_slot_guard_state.json.")
     parser.add_argument("--slot-guard-poll-ms", type=int, default=1000)
     parser.add_argument("--slot-guard-hide-labels-ms", type=float, default=25.0)
@@ -1542,6 +1601,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slot-guard-avg-threshold", type=float, default=18.0)
     parser.add_argument("--slot-guard-min-changed-samples", type=int, default=3)
     parser.add_argument("--slot-guard-min-samples", type=int, default=5)
+    parser.add_argument("--slot-guard-empty-avg-luma", type=float, default=16.0)
+    parser.add_argument("--slot-guard-empty-max-luma", type=float, default=30.0)
+    parser.add_argument("--slot-guard-empty-avg-saturation", type=float, default=8.0)
+    parser.add_argument("--slot-guard-empty-colored-threshold", type=float, default=12.0)
+    parser.add_argument("--slot-guard-empty-max-colored-samples", type=int, default=1)
     parser.add_argument("--slot-guard-mass-change-ratio", type=float, default=0.45)
     parser.add_argument("--slot-guard-mass-change-min", type=int, default=4)
     parser.add_argument("--debug-slot-guard", action="store_true")
@@ -1554,6 +1618,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--calibrate", action="store_true")
     parser.add_argument("--click-through", action="store_true", default=True)
     parser.add_argument("--no-click-through", action="store_false", dest="click_through")
+    parser.add_argument("--singleton", action="store_true", default=True, help="Stop other poe_stash_overlay.py processes before starting.")
+    parser.add_argument("--allow-multiple", action="store_false", dest="singleton")
     parser.add_argument("--dry-run", action="store_true", help="Print overlay labels and exit.")
     return parser
 
@@ -1561,6 +1627,10 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.slot_guard is None:
+        args.slot_guard = bool(args.auto_marker)
+    if args.singleton and not args.dry_run:
+        stop_other_overlay_processes()
     entries = collect_entries(args)
     if args.dry_run:
         print_entries(entries)

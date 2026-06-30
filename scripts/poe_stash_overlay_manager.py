@@ -196,6 +196,8 @@ def overlay_command(args: argparse.Namespace, *, calibrate: bool = False) -> lis
         command.append("--debug-tabs")
     if args.slot_guard:
         command.extend(["--slot-guard", "--slot-guard-poll-ms", str(args.slot_guard_poll_ms)])
+    else:
+        command.append("--no-slot-guard")
     if args.debug_slot_guard:
         command.append("--debug-slot-guard")
     if calibrate:
