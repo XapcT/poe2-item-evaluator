@@ -36,7 +36,7 @@ DEFAULT_TAB_SCAN_TOP = 120
 DEFAULT_TAB_SCAN_WIDTH = 900
 DEFAULT_TAB_SCAN_HEIGHT = 55
 TRANSPARENT_COLOR = "#ff00ff"
-SLOT_GUARD_STATE_VERSION = 4
+SLOT_GUARD_STATE_VERSION = 5
 SLOT_SAMPLE_POINTS = (
     (0.15, 0.62),
     (0.50, 0.62),
@@ -1348,7 +1348,13 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
             print(f"activeMarker={marker_text} entries={len(display_entries)}", file=sys.stderr)
         redraw()
 
-    def confirm_stale_candidate(entry: OverlayEntry, reason: str, now: float) -> bool:
+    def confirm_stale_candidate(
+        entry: OverlayEntry,
+        reason: str,
+        now: float,
+        *,
+        allow_confirm: bool = True,
+    ) -> bool:
         if entry.key in slot_guard_stale_keys:
             return False
         first_seen = slot_guard_pending_stale.get(entry.key)
@@ -1356,6 +1362,8 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
             slot_guard_pending_stale[entry.key] = now
             if args.debug_slot_guard:
                 print(f"slotGuard=pending reason={reason} key={entry.key} text={entry.text}", file=sys.stderr)
+            return False
+        if not allow_confirm:
             return False
         delay_ms = max(0.0, args.slot_guard_disappear_delay_ms)
         if (now - first_seen) * 1000.0 < delay_ms:
@@ -1442,11 +1450,23 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
         )
         if len(all_candidates) >= max_mass_changes:
             for entry in all_candidates:
-                slot_guard_pending_stale.pop(entry.key, None)
+                confirm_stale_candidate(entry, "mass", now, allow_confirm=False)
+            ready_candidates = [
+                entry
+                for entry in all_candidates
+                if (now - slot_guard_pending_stale.get(entry.key, now)) * 1000.0
+                >= max(0.0, args.slot_guard_disappear_delay_ms)
+            ]
+            ready_candidates.sort(key=lambda entry: slot_guard_pending_stale.get(entry.key, now))
+            for entry in ready_candidates[:max(0, args.slot_guard_mass_confirm_limit)]:
+                if confirm_stale_candidate(entry, "mass", now):
+                    state_changed = True
+                    visibility_changed = True
             if args.debug_slot_guard:
                 print(
                     "slotGuard=skip mass-change "
-                    f"empty={len(empty_candidates)} changed={len(stale_candidates)} entries={len(display_entries)}",
+                    f"empty={len(empty_candidates)} changed={len(stale_candidates)} "
+                    f"ready={len(ready_candidates)} entries={len(display_entries)}",
                     file=sys.stderr,
                 )
         else:
@@ -1735,6 +1755,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slot-guard-empty-max-colored-samples", type=int, default=1)
     parser.add_argument("--slot-guard-mass-change-ratio", type=float, default=0.45)
     parser.add_argument("--slot-guard-mass-change-min", type=int, default=4)
+    parser.add_argument("--slot-guard-mass-confirm-limit", type=int, default=2)
     parser.add_argument("--debug-slot-guard", action="store_true")
     parser.add_argument("--show-empty-status", action="store_true", default=True)
     parser.add_argument("--no-empty-status", action="store_false", dest="show_empty_status")
