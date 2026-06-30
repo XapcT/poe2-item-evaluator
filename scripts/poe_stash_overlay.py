@@ -38,15 +38,15 @@ DEFAULT_TAB_SCAN_HEIGHT = 55
 TRANSPARENT_COLOR = "#ff00ff"
 SLOT_GUARD_STATE_VERSION = 3
 SLOT_SAMPLE_POINTS = (
-    (0.25, 0.38),
-    (0.50, 0.38),
-    (0.75, 0.38),
-    (0.25, 0.55),
-    (0.50, 0.55),
-    (0.75, 0.55),
-    (0.25, 0.72),
-    (0.50, 0.72),
-    (0.75, 0.72),
+    (0.15, 0.62),
+    (0.50, 0.62),
+    (0.85, 0.62),
+    (0.15, 0.78),
+    (0.50, 0.78),
+    (0.85, 0.78),
+    (0.15, 0.92),
+    (0.50, 0.92),
+    (0.85, 0.92),
 )
 
 
@@ -801,6 +801,21 @@ def color_for(entry: OverlayEntry) -> tuple[str, str]:
     return "#b6ff7a", "#102000"
 
 
+def blend_hex_color(color: str, target: str, opacity: float) -> str:
+    opacity = max(0.0, min(1.0, opacity))
+    color = color.lstrip("#")
+    target = target.lstrip("#")
+    if len(color) != 6 or len(target) != 6:
+        return f"#{color}"
+    parts = []
+    for index in (0, 2, 4):
+        source_value = int(color[index:index + 2], 16)
+        target_value = int(target[index:index + 2], 16)
+        mixed = round(target_value + (source_value - target_value) * opacity)
+        parts.append(f"{mixed:02x}")
+    return "#" + "".join(parts)
+
+
 def marker_display_name(marker: str) -> str:
     aliases = {
         "marker1": "1 mirror",
@@ -1084,6 +1099,49 @@ def draw_tab_scan_overlay(
         draw_label_box(canvas, left + group.x0 + 4, top + height - 18, f"{marker}{suffix}", color, "#181100")
 
 
+def draw_price_label(
+    canvas: Any,
+    entry: OverlayEntry,
+    profile: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    opacity: float = 1.0,
+) -> None:
+    left = int(profile.get("gridLeft", args.grid_left))
+    top = int(profile.get("gridTop", args.grid_top))
+    cell = float(profile.get("cellSize", args.cell_size))
+    fg, bg = color_for(entry)
+    if opacity < 1.0:
+        fg = blend_hex_color(fg, "#2b2b2b", opacity)
+        bg = blend_hex_color(bg, "#090909", opacity)
+    cx = left + entry.x * cell + cell * 0.5
+    cy = top + entry.y * cell + cell * 0.18
+    text_id = canvas.create_text(
+        cx,
+        cy,
+        text=entry.text,
+        fill=fg,
+        font=("Segoe UI", args.font_size, "bold"),
+        anchor="n",
+        tags=("price-label",),
+    )
+    bbox = canvas.bbox(text_id)
+    if bbox:
+        pad_x = 5
+        pad_y = 2
+        rect = canvas.create_rectangle(
+            bbox[0] - pad_x,
+            bbox[1] - pad_y,
+            bbox[2] + pad_x,
+            bbox[3] + pad_y,
+            fill=bg,
+            outline=fg,
+            width=1,
+            tags=("price-label",),
+        )
+        canvas.tag_lower(rect, text_id)
+
+
 def draw_overlay(
     canvas: Any,
     entries: list[OverlayEntry],
@@ -1092,6 +1150,7 @@ def draw_overlay(
     status_text: str | None = None,
     tab_state: TabState | None = None,
     selected_mode: str | None = None,
+    fading_entries: list[tuple[OverlayEntry, float]] | None = None,
 ) -> None:
     left = int(profile.get("gridLeft", args.grid_left))
     top = int(profile.get("gridTop", args.grid_top))
@@ -1112,33 +1171,12 @@ def draw_overlay(
     for entry in entries:
         if entry.x < 0 or entry.y < 0 or entry.x >= cols or entry.y >= rows:
             continue
-        fg, bg = color_for(entry)
-        cx = left + entry.x * cell + cell * 0.5
-        cy = top + entry.y * cell + cell * 0.18
-        text_id = canvas.create_text(
-            cx,
-            cy,
-            text=entry.text,
-            fill=fg,
-            font=("Segoe UI", args.font_size, "bold"),
-            anchor="n",
-            tags=("price-label",),
-        )
-        bbox = canvas.bbox(text_id)
-        if bbox:
-            pad_x = 5
-            pad_y = 2
-            rect = canvas.create_rectangle(
-                bbox[0] - pad_x,
-                bbox[1] - pad_y,
-                bbox[2] + pad_x,
-                bbox[3] + pad_y,
-                fill=bg,
-                outline=fg,
-                width=1,
-                tags=("price-label",),
-            )
-            canvas.tag_lower(rect, text_id)
+        draw_price_label(canvas, entry, profile, args)
+
+    for entry, opacity in fading_entries or []:
+        if entry.x < 0 or entry.y < 0 or entry.x >= cols or entry.y >= rows:
+            continue
+        draw_price_label(canvas, entry, profile, args, opacity=opacity)
 
     if status_text:
         draw_empty_status(canvas, profile, args, status_text)
@@ -1208,9 +1246,31 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
     current_marker: str | None = "__unset__"
     slot_guard_baselines: dict[str, tuple[tuple[int, int, int], ...]] = loaded_baselines
     slot_guard_stale_keys: set[str] = loaded_stale_keys
+    slot_guard_pending_stale: dict[str, float] = {}
+    slot_guard_fading: dict[str, tuple[OverlayEntry, float]] = {}
+    fade_animation_active = {"value": False}
     calibration_mode = {"name": "grid"}
     drag_state: dict[str, Any] = {"active": False, "x": 0, "y": 0, "mode": "grid"}
     enter_state = {"last": 0.0}
+
+    def active_marker_key() -> str | None:
+        return None if current_marker in {"__unset__", "__all__"} else current_marker
+
+    def fading_for_current_marker(now: float | None = None) -> list[tuple[OverlayEntry, float]]:
+        if now is None:
+            now = time.monotonic()
+        fade_ms = max(0.0, args.slot_guard_fade_ms)
+        active_marker = active_marker_key()
+        faded: list[tuple[OverlayEntry, float]] = []
+        for entry, fade_start in slot_guard_fading.values():
+            if args.auto_marker and entry.marker != active_marker:
+                continue
+            if fade_ms <= 0:
+                continue
+            opacity = max(0.0, 1.0 - ((now - fade_start) * 1000.0 / fade_ms))
+            if opacity > 0:
+                faded.append((entry, opacity))
+        return faded
 
     def redraw() -> None:
         tab_state = None
@@ -1221,7 +1281,40 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
                 window_left=window_state["left"],
                 window_top=window_state["top"],
             )
-        draw_overlay(canvas, display_entries, profile, args, display_status, tab_state, calibration_mode["name"])
+        draw_overlay(
+            canvas,
+            display_entries,
+            profile,
+            args,
+            display_status,
+            tab_state,
+            calibration_mode["name"],
+            fading_for_current_marker(),
+        )
+
+    def tick_fades() -> None:
+        now = time.monotonic()
+        fade_ms = max(0.0, args.slot_guard_fade_ms)
+        expired = [
+            key
+            for key, (_entry, fade_start) in slot_guard_fading.items()
+            if fade_ms <= 0 or (now - fade_start) * 1000.0 >= fade_ms
+        ]
+        for key in expired:
+            slot_guard_fading.pop(key, None)
+        if slot_guard_fading:
+            redraw()
+            root.after(max(16, args.slot_guard_fade_frame_ms), tick_fades)
+        else:
+            fade_animation_active["value"] = False
+            if expired:
+                redraw()
+
+    def ensure_fade_tick() -> None:
+        if fade_animation_active["value"]:
+            return
+        fade_animation_active["value"] = True
+        root.after(max(16, args.slot_guard_fade_frame_ms), tick_fades)
 
     def selected_entries(next_marker: str | None) -> list[OverlayEntry]:
         if args.auto_marker:
@@ -1248,11 +1341,34 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
         current_marker = selection_key
         selected = selected_entries(next_marker)
         display_entries = [entry for entry in selected if entry.key not in slot_guard_stale_keys]
-        display_status = stale_status_text(next_marker, len(selected), len(display_entries))
+        fading_count = sum(1 for entry in selected if entry.key in slot_guard_fading)
+        display_status = stale_status_text(next_marker, len(selected), len(display_entries) + fading_count)
         if args.debug_tabs:
             marker_text = next_marker if next_marker is not None else "none"
             print(f"activeMarker={marker_text} entries={len(display_entries)}", file=sys.stderr)
         redraw()
+
+    def confirm_stale_candidate(entry: OverlayEntry, reason: str, now: float) -> bool:
+        if entry.key in slot_guard_stale_keys:
+            return False
+        first_seen = slot_guard_pending_stale.get(entry.key)
+        if first_seen is None:
+            slot_guard_pending_stale[entry.key] = now
+            if args.debug_slot_guard:
+                print(f"slotGuard=pending reason={reason} key={entry.key} text={entry.text}", file=sys.stderr)
+            return False
+        delay_ms = max(0.0, args.slot_guard_disappear_delay_ms)
+        if (now - first_seen) * 1000.0 < delay_ms:
+            return False
+        slot_guard_pending_stale.pop(entry.key, None)
+        slot_guard_stale_keys.add(entry.key)
+        slot_guard_baselines.pop(entry.key, None)
+        if args.slot_guard_fade_ms > 0:
+            slot_guard_fading[entry.key] = (entry, now)
+            ensure_fade_tick()
+        if args.debug_slot_guard:
+            print(f"slotGuard=fade reason={reason} key={entry.key} text={entry.text}", file=sys.stderr)
+        return True
 
     def check_slot_guard() -> None:
         if not args.slot_guard or args.calibrate or not display_entries:
@@ -1277,10 +1393,12 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
                 return
         labels_were_hidden = False
         try:
-            canvas.itemconfigure("price-label", state="hidden")
-            labels_were_hidden = True
-            root.update_idletasks()
-            time.sleep(max(0.0, args.slot_guard_hide_labels_ms / 1000.0))
+            hide_labels_ms = max(0.0, args.slot_guard_hide_labels_ms)
+            if hide_labels_ms > 0:
+                canvas.itemconfigure("price-label", state="hidden")
+                labels_were_hidden = True
+                root.update_idletasks()
+                time.sleep(hide_labels_ms / 1000.0)
             capture = capture_grid_pixels(
                 profile,
                 args,
@@ -1295,8 +1413,10 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
             return
         width, height, raw_bgra = capture
         state_changed = False
+        visibility_changed = False
         empty_candidates: list[OverlayEntry] = []
         stale_candidates: list[OverlayEntry] = []
+        candidate_keys: set[str] = set()
         for entry in display_entries:
             if entry.key in slot_guard_stale_keys:
                 continue
@@ -1313,12 +1433,12 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
                 continue
             if slot_fingerprint_changed(baseline, current, args):
                 stale_candidates.append(entry)
+        now = time.monotonic()
         for entry in empty_candidates:
-            slot_guard_stale_keys.add(entry.key)
-            slot_guard_baselines.pop(entry.key, None)
-            state_changed = True
-            if args.debug_slot_guard:
-                print(f"slotGuard=empty key={entry.key} text={entry.text}", file=sys.stderr)
+            candidate_keys.add(entry.key)
+            if confirm_stale_candidate(entry, "empty", now):
+                state_changed = True
+                visibility_changed = True
         if stale_candidates:
             max_mass_changes = max(
                 args.slot_guard_mass_change_min,
@@ -1332,15 +1452,17 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
                     )
             else:
                 for entry in stale_candidates:
-                    slot_guard_stale_keys.add(entry.key)
-                    state_changed = True
-                    if args.debug_slot_guard:
-                        print(f"slotGuard=stale key={entry.key} text={entry.text}", file=sys.stderr)
+                    candidate_keys.add(entry.key)
+                    if confirm_stale_candidate(entry, "changed", now):
+                        state_changed = True
+                        visibility_changed = True
+        for entry in display_entries:
+            if entry.key not in candidate_keys:
+                slot_guard_pending_stale.pop(entry.key, None)
         if state_changed:
             save_slot_guard_state(args, slot_guard_report_signature, slot_guard_baselines, slot_guard_stale_keys)
-        if (empty_candidates or stale_candidates) and state_changed:
-            active_marker = None if current_marker in {"__unset__", "__all__"} else current_marker
-            update_display_entries(active_marker, force=True)
+        if visibility_changed:
+            update_display_entries(active_marker_key(), force=True)
 
     def poll_active_tab() -> None:
         marker = detect_active_marker(
@@ -1596,7 +1718,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-slot-guard", action="store_false", dest="slot_guard")
     parser.add_argument("--slot-guard-state", type=Path, help="Persistent slot-guard state file. Defaults to <search-root>/poe_stash_slot_guard_state.json.")
     parser.add_argument("--slot-guard-poll-ms", type=int, default=1000)
-    parser.add_argument("--slot-guard-hide-labels-ms", type=float, default=25.0)
+    parser.add_argument("--slot-guard-hide-labels-ms", type=float, default=0.0)
+    parser.add_argument("--slot-guard-disappear-delay-ms", type=float, default=650.0)
+    parser.add_argument("--slot-guard-fade-ms", type=float, default=600.0)
+    parser.add_argument("--slot-guard-fade-frame-ms", type=int, default=50)
     parser.add_argument("--slot-guard-point-threshold", type=float, default=28.0)
     parser.add_argument("--slot-guard-avg-threshold", type=float, default=18.0)
     parser.add_argument("--slot-guard-min-changed-samples", type=int, default=3)
