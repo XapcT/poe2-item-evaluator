@@ -36,7 +36,7 @@ DEFAULT_TAB_SCAN_TOP = 120
 DEFAULT_TAB_SCAN_WIDTH = 900
 DEFAULT_TAB_SCAN_HEIGHT = 55
 TRANSPARENT_COLOR = "#ff00ff"
-SLOT_GUARD_STATE_VERSION = 3
+SLOT_GUARD_STATE_VERSION = 4
 SLOT_SAMPLE_POINTS = (
     (0.15, 0.62),
     (0.50, 0.62),
@@ -1434,28 +1434,30 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
             if slot_fingerprint_changed(baseline, current, args):
                 stale_candidates.append(entry)
         now = time.monotonic()
-        for entry in empty_candidates:
-            candidate_keys.add(entry.key)
-            if confirm_stale_candidate(entry, "empty", now):
-                state_changed = True
-                visibility_changed = True
-        if stale_candidates:
-            max_mass_changes = max(
-                args.slot_guard_mass_change_min,
-                int(max(1, len(display_entries)) * args.slot_guard_mass_change_ratio),
-            )
-            if len(stale_candidates) >= max_mass_changes:
-                if args.debug_slot_guard:
-                    print(
-                        f"slotGuard=skip mass-change candidates={len(stale_candidates)} entries={len(display_entries)}",
-                        file=sys.stderr,
-                    )
-            else:
-                for entry in stale_candidates:
-                    candidate_keys.add(entry.key)
-                    if confirm_stale_candidate(entry, "changed", now):
-                        state_changed = True
-                        visibility_changed = True
+        all_candidates = empty_candidates + stale_candidates
+        candidate_keys.update(entry.key for entry in all_candidates)
+        max_mass_changes = max(
+            args.slot_guard_mass_change_min,
+            int(max(1, len(display_entries)) * args.slot_guard_mass_change_ratio),
+        )
+        if len(all_candidates) >= max_mass_changes:
+            for entry in all_candidates:
+                slot_guard_pending_stale.pop(entry.key, None)
+            if args.debug_slot_guard:
+                print(
+                    "slotGuard=skip mass-change "
+                    f"empty={len(empty_candidates)} changed={len(stale_candidates)} entries={len(display_entries)}",
+                    file=sys.stderr,
+                )
+        else:
+            for entry in empty_candidates:
+                if confirm_stale_candidate(entry, "empty", now):
+                    state_changed = True
+                    visibility_changed = True
+            for entry in stale_candidates:
+                if confirm_stale_candidate(entry, "changed", now):
+                    state_changed = True
+                    visibility_changed = True
         for entry in display_entries:
             if entry.key not in candidate_keys:
                 slot_guard_pending_stale.pop(entry.key, None)
