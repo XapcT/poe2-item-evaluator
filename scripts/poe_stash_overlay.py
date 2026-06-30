@@ -35,6 +35,7 @@ DEFAULT_TAB_SCAN_TOP = 120
 DEFAULT_TAB_SCAN_WIDTH = 900
 DEFAULT_TAB_SCAN_HEIGHT = 55
 TRANSPARENT_COLOR = "#ff00ff"
+SLOT_GUARD_STATE_VERSION = 2
 SLOT_SAMPLE_POINTS = (
     (0.25, 0.38),
     (0.50, 0.38),
@@ -445,7 +446,11 @@ def load_slot_guard_state(
         data = load_json(path)
     except (OSError, json.JSONDecodeError):
         return {}, set()
-    if not isinstance(data, dict) or data.get("reportSignature") != signature:
+    if (
+        not isinstance(data, dict)
+        or data.get("version") != SLOT_GUARD_STATE_VERSION
+        or data.get("reportSignature") != signature
+    ):
         return {}, set()
     raw_baselines = data.get("baselines")
     baselines: dict[str, tuple[tuple[int, int, int], ...]] = {}
@@ -468,6 +473,7 @@ def save_slot_guard_state(
     path = slot_guard_state_path(args)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = {
+        "version": SLOT_GUARD_STATE_VERSION,
         "reportSignature": signature,
         "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "baselines": {key: [list(point) for point in value] for key, value in sorted(baselines.items())},
@@ -1068,6 +1074,7 @@ def draw_overlay(
             fill=fg,
             font=("Segoe UI", args.font_size, "bold"),
             anchor="n",
+            tags=("price-label",),
         )
         bbox = canvas.bbox(text_id)
         if bbox:
@@ -1081,6 +1088,7 @@ def draw_overlay(
                 fill=bg,
                 outline=fg,
                 width=1,
+                tags=("price-label",),
             )
             canvas.tag_lower(rect, text_id)
 
@@ -1219,17 +1227,27 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
                         file=sys.stderr,
                     )
                 return
-        capture = capture_grid_pixels(
-            profile,
-            args,
-            window_left=window_state["left"],
-            window_top=window_state["top"],
-        )
+        labels_were_hidden = False
+        try:
+            canvas.itemconfigure("price-label", state="hidden")
+            labels_were_hidden = True
+            root.update_idletasks()
+            time.sleep(max(0.0, args.slot_guard_hide_labels_ms / 1000.0))
+            capture = capture_grid_pixels(
+                profile,
+                args,
+                window_left=window_state["left"],
+                window_top=window_state["top"],
+            )
+        finally:
+            if labels_were_hidden:
+                canvas.itemconfigure("price-label", state="normal")
+                root.update_idletasks()
         if capture is None:
             return
         width, height, raw_bgra = capture
-        changed = False
         state_changed = False
+        stale_candidates: list[OverlayEntry] = []
         for entry in display_entries:
             if entry.key in slot_guard_stale_keys:
                 continue
@@ -1242,14 +1260,27 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
                 state_changed = True
                 continue
             if slot_fingerprint_changed(baseline, current, args):
-                slot_guard_stale_keys.add(entry.key)
-                changed = True
-                state_changed = True
+                stale_candidates.append(entry)
+        if stale_candidates:
+            max_mass_changes = max(
+                args.slot_guard_mass_change_min,
+                int(max(1, len(display_entries)) * args.slot_guard_mass_change_ratio),
+            )
+            if len(stale_candidates) >= max_mass_changes:
                 if args.debug_slot_guard:
-                    print(f"slotGuard=stale key={entry.key} text={entry.text}", file=sys.stderr)
+                    print(
+                        f"slotGuard=skip mass-change candidates={len(stale_candidates)} entries={len(display_entries)}",
+                        file=sys.stderr,
+                    )
+            else:
+                for entry in stale_candidates:
+                    slot_guard_stale_keys.add(entry.key)
+                    state_changed = True
+                    if args.debug_slot_guard:
+                        print(f"slotGuard=stale key={entry.key} text={entry.text}", file=sys.stderr)
         if state_changed:
             save_slot_guard_state(args, slot_guard_report_signature, slot_guard_baselines, slot_guard_stale_keys)
-        if changed:
+        if stale_candidates and state_changed:
             active_marker = None if current_marker in {"__unset__", "__all__"} else current_marker
             update_display_entries(active_marker, force=True)
 
@@ -1506,10 +1537,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slot-guard", action="store_true", help="Hide labels when sampled slot pixels change after the overlay captures a baseline.")
     parser.add_argument("--slot-guard-state", type=Path, help="Persistent slot-guard state file. Defaults to <search-root>/poe_stash_slot_guard_state.json.")
     parser.add_argument("--slot-guard-poll-ms", type=int, default=1000)
+    parser.add_argument("--slot-guard-hide-labels-ms", type=float, default=25.0)
     parser.add_argument("--slot-guard-point-threshold", type=float, default=28.0)
     parser.add_argument("--slot-guard-avg-threshold", type=float, default=18.0)
     parser.add_argument("--slot-guard-min-changed-samples", type=int, default=3)
     parser.add_argument("--slot-guard-min-samples", type=int, default=5)
+    parser.add_argument("--slot-guard-mass-change-ratio", type=float, default=0.45)
+    parser.add_argument("--slot-guard-mass-change-min", type=int, default=4)
     parser.add_argument("--debug-slot-guard", action="store_true")
     parser.add_argument("--show-empty-status", action="store_true", default=True)
     parser.add_argument("--no-empty-status", action="store_false", dest="show_empty_status")

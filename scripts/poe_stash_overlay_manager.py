@@ -2,7 +2,8 @@
 """Manage the local PoE2 stash price overlay.
 
 This helper keeps the long overlay command stable for agents. It can run the
-one-time overlay, open calibration, and register a per-agent Windows Run entry.
+one-time overlay, open calibration, and register the Windows Run entry.
+Only one stash overlay should be active at a time.
 """
 
 from __future__ import annotations
@@ -105,16 +106,68 @@ def process_query(agent_id: str | None = None) -> list[dict[str, Any]]:
     return data
 
 
-def stop_processes(agent_id: str) -> int:
-    escaped = agent_id.replace("'", "''")
+def stop_processes(agent_id: str | None = None) -> int:
+    agent_filter = ""
+    if agent_id:
+        escaped = agent_id.replace("'", "''")
+        agent_filter = f"-and ($_.CommandLine -like '*--agent-id*{escaped}*') "
     command = (
         "Get-CimInstance Win32_Process | "
         "Where-Object { ($_.Name -like 'python*') -and ($_.CommandLine -like '*poe_stash_overlay.py*') "
-        f"-and ($_.CommandLine -like '*--agent-id*{escaped}*') }} | "
+        f"{agent_filter}}} | "
         "ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"
     )
     subprocess.run(["powershell", "-NoProfile", "-Command", command], check=False)
-    return len(process_query(agent_id))
+    deadline = time.time() + 3.0
+    remaining = process_query(agent_id)
+    while remaining and time.time() < deadline:
+        time.sleep(0.2)
+        remaining = process_query(agent_id)
+    return len(remaining)
+
+
+def read_all_autostarts() -> dict[str, str]:
+    if os.name != "nt":
+        return {}
+    import winreg
+
+    values: dict[str, str] = {}
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ) as key:
+            index = 0
+            while True:
+                try:
+                    name, value, _kind = winreg.EnumValue(key, index)
+                except OSError:
+                    break
+                if name.startswith(RUN_VALUE_PREFIX):
+                    values[name] = str(value)
+                index += 1
+    except FileNotFoundError:
+        return {}
+    return values
+
+
+def clear_overlay_autostarts(*, keep_value_name: str | None = None) -> list[str]:
+    if os.name != "nt":
+        return []
+    import winreg
+
+    removed: list[str] = []
+    value_names = [name for name in read_all_autostarts() if name != keep_value_name]
+    if not value_names:
+        return removed
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
+            for name in value_names:
+                try:
+                    winreg.DeleteValue(key, name)
+                    removed.append(name)
+                except FileNotFoundError:
+                    pass
+    except FileNotFoundError:
+        return removed
+    return removed
 
 
 def overlay_command(args: argparse.Namespace, *, calibrate: bool = False) -> list[str]:
@@ -155,8 +208,9 @@ def overlay_command(args: argparse.Namespace, *, calibrate: bool = False) -> lis
 
 
 def launch_overlay(args: argparse.Namespace, *, calibrate: bool = False) -> int:
+    remaining_after_stop: int | None = None
     if args.stop_existing:
-        stop_processes(args.agent_id)
+        remaining_after_stop = stop_processes()
     command = overlay_command(args, calibrate=calibrate)
     subprocess.Popen([pythonw_path(), *command], close_fds=True)
     update_agent_state(
@@ -165,8 +219,12 @@ def launch_overlay(args: argparse.Namespace, *, calibrate: bool = False) -> int:
         autostartValue=run_value_name(args.agent_id),
         profile=str(args.profile),
         searchRoot=str(args.search_root),
+        singleton=True,
     )
-    print(f"started agentId={args.agent_id}")
+    if remaining_after_stop is None:
+        print(f"started agentId={args.agent_id}")
+    else:
+        print(f"started agentId={args.agent_id} stoppedExistingRemaining={remaining_after_stop}")
     return 0
 
 
@@ -177,6 +235,7 @@ def set_autostart(args: argparse.Namespace) -> int:
 
     command = subprocess.list2cmdline([pythonw_path(), *overlay_command(args, calibrate=False)])
     value_name = run_value_name(args.agent_id)
+    removed_values = clear_overlay_autostarts(keep_value_name=value_name)
     with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
         winreg.SetValueEx(key, value_name, 0, winreg.REG_SZ, command)
     update_agent_state(
@@ -186,8 +245,10 @@ def set_autostart(args: argparse.Namespace) -> int:
         autostartCommand=command,
         profile=str(args.profile),
         searchRoot=str(args.search_root),
+        singleton=True,
+        removedAutostartValues=removed_values,
     )
-    print(f"enabled autostart value={value_name}")
+    print(f"enabled autostart value={value_name} removedOtherValues={removed_values}")
     if args.start_now:
         launch_overlay(args, calibrate=False)
     return 0
@@ -199,16 +260,13 @@ def clear_autostart(args: argparse.Namespace) -> int:
     import winreg
 
     value_name = run_value_name(args.agent_id)
-    try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_SET_VALUE) as key:
-            winreg.DeleteValue(key, value_name)
-        removed = True
-    except FileNotFoundError:
-        removed = False
+    removed_values = clear_overlay_autostarts()
+    removed = value_name in removed_values
     update_agent_state(args.agent_id, autostart=False, autostartValue=value_name, autostartCommand=None)
+    remaining = None
     if args.stop_running:
-        stop_processes(args.agent_id)
-    print(f"disabled autostart value={value_name} removed={removed}")
+        remaining = stop_processes()
+    print(f"disabled autostart value={value_name} removed={removed} removedValues={removed_values} remaining={remaining}")
     return 0
 
 
@@ -228,13 +286,16 @@ def read_autostart(agent_id: str) -> str | None:
 
 def print_status(args: argparse.Namespace) -> int:
     processes = process_query(args.agent_id)
+    all_processes = process_query()
     autostart = read_autostart(args.agent_id)
     print(json.dumps(
         {
             "agentId": args.agent_id,
             "running": processes,
+            "allRunning": all_processes,
             "autostartValue": run_value_name(args.agent_id),
             "autostartCommand": autostart,
+            "allAutostartValues": read_all_autostarts(),
             "stateFile": str(STATE_FILE),
         },
         ensure_ascii=False,
@@ -279,8 +340,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "start":
         return launch_overlay(args, calibrate=False)
     if args.action == "stop":
-        remaining = stop_processes(args.agent_id)
-        print(f"stopped agentId={args.agent_id} remaining={remaining}")
+        remaining = stop_processes()
+        print(f"stopped all overlay processes remaining={remaining}")
         return 0
     if args.action == "status":
         return print_status(args)
