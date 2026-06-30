@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import ctypes.wintypes
+import hashlib
 import json
 import os
 import re
@@ -34,6 +35,17 @@ DEFAULT_TAB_SCAN_TOP = 120
 DEFAULT_TAB_SCAN_WIDTH = 900
 DEFAULT_TAB_SCAN_HEIGHT = 55
 TRANSPARENT_COLOR = "#ff00ff"
+SLOT_SAMPLE_POINTS = (
+    (0.25, 0.38),
+    (0.50, 0.38),
+    (0.75, 0.38),
+    (0.25, 0.55),
+    (0.50, 0.55),
+    (0.75, 0.55),
+    (0.25, 0.72),
+    (0.50, 0.72),
+    (0.75, 0.72),
+)
 
 
 @dataclass
@@ -387,6 +399,81 @@ def print_entries(entries: list[OverlayEntry]) -> None:
         price = "?" if entry.price_exalted is None else f"{entry.price_exalted:g}ex"
         detail = f" | {entry.detail}" if entry.detail else ""
         print(f"{entry.marker} x={entry.x} y={entry.y} col={entry.x + 1} row={entry.y + 1} {entry.text} ({price}){detail}")
+
+
+def slot_guard_state_path(args: argparse.Namespace) -> Path:
+    if args.slot_guard_state:
+        return args.slot_guard_state
+    return args.search_root / "poe_stash_slot_guard_state.json"
+
+
+def report_signature(entries: list[OverlayEntry]) -> str:
+    parts: list[str] = []
+    for source in sorted({entry.source for entry in entries if entry.source}):
+        path = Path(source)
+        try:
+            stat = path.stat()
+            parts.append(f"{path.resolve()}|{stat.st_size}|{stat.st_mtime_ns}")
+        except OSError:
+            parts.append(source)
+    digest = hashlib.sha1("\n".join(parts).encode("utf-8", "replace")).hexdigest()
+    return digest
+
+
+def decode_fingerprint(value: Any) -> tuple[tuple[int, int, int], ...] | None:
+    if not isinstance(value, list):
+        return None
+    points: list[tuple[int, int, int]] = []
+    for item in value:
+        if not isinstance(item, list) or len(item) != 3:
+            return None
+        try:
+            points.append((int(item[0]), int(item[1]), int(item[2])))
+        except (TypeError, ValueError):
+            return None
+    return tuple(points)
+
+
+def load_slot_guard_state(
+    args: argparse.Namespace,
+    signature: str,
+) -> tuple[dict[str, tuple[tuple[int, int, int], ...]], set[str]]:
+    path = slot_guard_state_path(args)
+    if not path.exists():
+        return {}, set()
+    try:
+        data = load_json(path)
+    except (OSError, json.JSONDecodeError):
+        return {}, set()
+    if not isinstance(data, dict) or data.get("reportSignature") != signature:
+        return {}, set()
+    raw_baselines = data.get("baselines")
+    baselines: dict[str, tuple[tuple[int, int, int], ...]] = {}
+    if isinstance(raw_baselines, dict):
+        for key, value in raw_baselines.items():
+            fingerprint = decode_fingerprint(value)
+            if fingerprint is not None:
+                baselines[str(key)] = fingerprint
+    raw_stale = data.get("staleKeys")
+    stale_keys = {str(item) for item in raw_stale} if isinstance(raw_stale, list) else set()
+    return baselines, stale_keys
+
+
+def save_slot_guard_state(
+    args: argparse.Namespace,
+    signature: str,
+    baselines: dict[str, tuple[tuple[int, int, int], ...]],
+    stale_keys: set[str],
+) -> None:
+    path = slot_guard_state_path(args)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {
+        "reportSignature": signature,
+        "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "baselines": {key: [list(point) for point in value] for key, value in sorted(baselines.items())},
+        "staleKeys": sorted(stale_keys),
+    }
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_profile(path: Path) -> dict[str, Any]:
@@ -759,6 +846,60 @@ def grid_rect(profile: dict[str, Any], args: argparse.Namespace) -> tuple[int, i
     return left, top, int(cols * cell), int(rows * cell)
 
 
+def capture_grid_pixels(
+    profile: dict[str, Any],
+    args: argparse.Namespace,
+    *,
+    window_left: int,
+    window_top: int,
+) -> tuple[int, int, bytes] | None:
+    left, top, width, height = grid_rect(profile, args)
+    return capture_screen_region(window_left + left, window_top + top, width, height)
+
+
+def sample_slot_fingerprint(
+    entry: OverlayEntry,
+    width: int,
+    height: int,
+    raw_bgra: bytes,
+    profile: dict[str, Any],
+    args: argparse.Namespace,
+) -> tuple[tuple[int, int, int], ...] | None:
+    cell = float(profile.get("cellSize", args.cell_size))
+    samples: list[tuple[int, int, int]] = []
+    for rel_x, rel_y in SLOT_SAMPLE_POINTS:
+        px = int(entry.x * cell + rel_x * cell)
+        py = int(entry.y * cell + rel_y * cell)
+        if px < 0 or py < 0 or px >= width or py >= height:
+            continue
+        offset = (py * width + px) * 4
+        b = raw_bgra[offset]
+        g = raw_bgra[offset + 1]
+        r = raw_bgra[offset + 2]
+        samples.append((r, g, b))
+    if len(samples) < args.slot_guard_min_samples:
+        return None
+    return tuple(samples)
+
+
+def slot_fingerprint_changed(
+    baseline: tuple[tuple[int, int, int], ...],
+    current: tuple[tuple[int, int, int], ...],
+    args: argparse.Namespace,
+) -> bool:
+    if len(baseline) != len(current):
+        return True
+    changed_samples = 0
+    total_delta = 0.0
+    for old_rgb, new_rgb in zip(baseline, current):
+        delta = sum(abs(old - new) for old, new in zip(old_rgb, new_rgb)) / 3.0
+        total_delta += delta
+        if delta >= args.slot_guard_point_threshold:
+            changed_samples += 1
+    avg_delta = total_delta / max(1, len(baseline))
+    return changed_samples >= args.slot_guard_min_changed_samples and avg_delta >= args.slot_guard_avg_threshold
+
+
 def point_in_rect(x: int, y: int, rect: tuple[int, int, int, int]) -> bool:
     left, top, width, height = rect
     return left <= x <= left + width and top <= y <= top + height
@@ -1002,9 +1143,15 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
     profile.setdefault("tabScanHeight", args.tab_scan_height)
     profile.setdefault("tabMarkers", list(DEFAULT_TAB_MARKERS))
 
+    slot_guard_report_signature = report_signature(entries)
+    loaded_baselines, loaded_stale_keys = (
+        load_slot_guard_state(args, slot_guard_report_signature) if args.slot_guard else ({}, set())
+    )
     display_entries = list(entries) if not args.auto_marker else []
     display_status: str | None = None
-    current_marker: str | None = None
+    current_marker: str | None = "__unset__"
+    slot_guard_baselines: dict[str, tuple[tuple[int, int, int], ...]] = loaded_baselines
+    slot_guard_stale_keys: set[str] = loaded_stale_keys
     calibration_mode = {"name": "grid"}
     drag_state: dict[str, Any] = {"active": False, "x": 0, "y": 0, "mode": "grid"}
     enter_state = {"last": 0.0}
@@ -1020,23 +1167,91 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
             )
         draw_overlay(canvas, display_entries, profile, args, display_status, tab_state, calibration_mode["name"])
 
-    def update_display_entries(next_marker: str | None) -> None:
+    def selected_entries(next_marker: str | None) -> list[OverlayEntry]:
+        if args.auto_marker:
+            if next_marker is None:
+                return []
+            return [entry for entry in entries if entry.marker == next_marker]
+        return list(entries)
+
+    def stale_status_text(next_marker: str | None, selected_count: int, visible_count: int) -> str | None:
+        if visible_count > 0:
+            return None
+        if selected_count > 0 and slot_guard_stale_keys:
+            name = marker_display_name(next_marker) if next_marker else "prices"
+            return f"{name}: слот изменился, нужна новая оценка"
+        if args.auto_marker and next_marker is not None and args.show_empty_status:
+            return f"{marker_display_name(next_marker)}: 0 >= {args.min_price_exalted:g}ex"
+        return None
+
+    def update_display_entries(next_marker: str | None, *, force: bool = False) -> None:
         nonlocal current_marker, display_entries, display_status
-        if next_marker == current_marker:
+        selection_key = next_marker if args.auto_marker else "__all__"
+        if not force and selection_key == current_marker:
             return
-        current_marker = next_marker
-        if next_marker is None:
-            display_entries = []
-            display_status = None
-        else:
-            display_entries = [entry for entry in entries if entry.marker == next_marker]
-            display_status = None
-            if not display_entries and args.show_empty_status:
-                display_status = f"{marker_display_name(next_marker)}: 0 >= {args.min_price_exalted:g}ex"
+        current_marker = selection_key
+        selected = selected_entries(next_marker)
+        display_entries = [entry for entry in selected if entry.key not in slot_guard_stale_keys]
+        display_status = stale_status_text(next_marker, len(selected), len(display_entries))
         if args.debug_tabs:
             marker_text = next_marker if next_marker is not None else "none"
             print(f"activeMarker={marker_text} entries={len(display_entries)}", file=sys.stderr)
         redraw()
+
+    def check_slot_guard() -> None:
+        if not args.slot_guard or args.calibrate or not display_entries:
+            return
+        if args.auto_marker:
+            detected_marker = detect_active_marker(
+                profile,
+                args,
+                window_left=window_state["left"],
+                window_top=window_state["top"],
+            )
+            expected_marker = None if current_marker in {"__unset__", "__all__"} else current_marker
+            if detected_marker != expected_marker:
+                update_display_entries(detected_marker, force=True)
+                if args.debug_slot_guard:
+                    expected_text = expected_marker if expected_marker is not None else "none"
+                    detected_text = detected_marker if detected_marker is not None else "none"
+                    print(
+                        f"slotGuard=skip inactive expected={expected_text} detected={detected_text}",
+                        file=sys.stderr,
+                    )
+                return
+        capture = capture_grid_pixels(
+            profile,
+            args,
+            window_left=window_state["left"],
+            window_top=window_state["top"],
+        )
+        if capture is None:
+            return
+        width, height, raw_bgra = capture
+        changed = False
+        state_changed = False
+        for entry in display_entries:
+            if entry.key in slot_guard_stale_keys:
+                continue
+            current = sample_slot_fingerprint(entry, width, height, raw_bgra, profile, args)
+            if current is None:
+                continue
+            baseline = slot_guard_baselines.get(entry.key)
+            if baseline is None:
+                slot_guard_baselines[entry.key] = current
+                state_changed = True
+                continue
+            if slot_fingerprint_changed(baseline, current, args):
+                slot_guard_stale_keys.add(entry.key)
+                changed = True
+                state_changed = True
+                if args.debug_slot_guard:
+                    print(f"slotGuard=stale key={entry.key} text={entry.text}", file=sys.stderr)
+        if state_changed:
+            save_slot_guard_state(args, slot_guard_report_signature, slot_guard_baselines, slot_guard_stale_keys)
+        if changed:
+            active_marker = None if current_marker in {"__unset__", "__all__"} else current_marker
+            update_display_entries(active_marker, force=True)
 
     def poll_active_tab() -> None:
         marker = detect_active_marker(
@@ -1047,6 +1262,10 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
         )
         update_display_entries(marker)
         root.after(args.tab_poll_ms, poll_active_tab)
+
+    def poll_slot_guard() -> None:
+        check_slot_guard()
+        root.after(args.slot_guard_poll_ms, poll_slot_guard)
 
     def poll_window() -> None:
         rect = find_target_window()
@@ -1216,7 +1435,7 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
     canvas.bind("<ButtonPress-1>", on_mouse_down)
     canvas.bind("<B1-Motion>", on_mouse_drag)
     canvas.bind("<ButtonRelease-1>", on_mouse_up)
-    redraw()
+    update_display_entries(None, force=True)
     if args.calibrate:
         root.after(100, lambda: (root.lift(), root.focus_force(), canvas.focus_set()))
         try:
@@ -1225,6 +1444,8 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
             pass
     if args.auto_marker:
         root.after(100, poll_active_tab)
+    if args.slot_guard and not args.calibrate:
+        root.after(args.slot_guard_poll_ms, poll_slot_guard)
     if args.follow_window or args.exit_with_window:
         root.after(args.window_poll_ms, poll_window)
     if args.calibrate:
@@ -1238,6 +1459,8 @@ def run_overlay(entries: list[OverlayEntry], args: argparse.Namespace) -> None:
     if args.auto_marker:
         markers = ", ".join(resolve_tab_markers(profile, args))
         print(f"Auto-marker: watching active tab color for markers [{markers}]. Hidden until one is active.")
+    if args.slot_guard and not args.calibrate:
+        print("Slot guard: hiding labels whose sampled slot pixels changed since this overlay run.")
     root.mainloop()
 
 
@@ -1280,6 +1503,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--tab-active-min-ratio", type=float, default=0.72)
     parser.add_argument("--tab-poll-ms", type=int, default=500)
     parser.add_argument("--debug-tabs", action="store_true")
+    parser.add_argument("--slot-guard", action="store_true", help="Hide labels when sampled slot pixels change after the overlay captures a baseline.")
+    parser.add_argument("--slot-guard-state", type=Path, help="Persistent slot-guard state file. Defaults to <search-root>/poe_stash_slot_guard_state.json.")
+    parser.add_argument("--slot-guard-poll-ms", type=int, default=1000)
+    parser.add_argument("--slot-guard-point-threshold", type=float, default=28.0)
+    parser.add_argument("--slot-guard-avg-threshold", type=float, default=18.0)
+    parser.add_argument("--slot-guard-min-changed-samples", type=int, default=3)
+    parser.add_argument("--slot-guard-min-samples", type=int, default=5)
+    parser.add_argument("--debug-slot-guard", action="store_true")
     parser.add_argument("--show-empty-status", action="store_true", default=True)
     parser.add_argument("--no-empty-status", action="store_false", dest="show_empty_status")
     parser.add_argument("--font-size", type=int, default=13)

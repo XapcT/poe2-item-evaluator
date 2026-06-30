@@ -141,6 +141,10 @@ def overlay_command(args: argparse.Namespace, *, calibrate: bool = False) -> lis
         command.append("--follow-window")
     if args.debug_tabs:
         command.append("--debug-tabs")
+    if args.slot_guard:
+        command.extend(["--slot-guard", "--slot-guard-poll-ms", str(args.slot_guard_poll_ms)])
+    if args.debug_slot_guard:
+        command.append("--debug-slot-guard")
     if calibrate:
         command.extend(["--calibrate", "--show-grid", "--show-tab-scan", "--no-click-through"])
     elif args.show_tab_scan:
@@ -257,6 +261,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-stop-existing", action="store_false", dest="stop_existing")
     parser.add_argument("--show-tab-scan", action="store_true")
     parser.add_argument("--debug-tabs", action="store_true")
+    parser.add_argument("--slot-guard", action="store_true", default=True)
+    parser.add_argument("--no-slot-guard", action="store_false", dest="slot_guard")
+    parser.add_argument("--slot-guard-poll-ms", type=int, default=1000)
+    parser.add_argument("--debug-slot-guard", action="store_true")
     parser.add_argument("--no-empty-status", action="store_true")
     parser.add_argument("--start-now", action="store_true")
     parser.add_argument("--stop-running", action="store_true")
