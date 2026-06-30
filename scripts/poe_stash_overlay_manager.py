@@ -197,7 +197,7 @@ def overlay_command(args: argparse.Namespace, *, calibrate: bool = False) -> lis
     if args.slot_guard:
         command.extend(["--slot-guard", "--slot-guard-poll-ms", str(args.slot_guard_poll_ms)])
     else:
-        command.append("--no-slot-guard")
+        command.extend(["--no-slot-guard", "--unsafe-no-slot-guard"])
     if args.debug_slot_guard:
         command.append("--debug-slot-guard")
     if calibrate:

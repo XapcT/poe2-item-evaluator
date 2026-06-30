@@ -1738,6 +1738,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--debug-tabs", action="store_true")
     parser.add_argument("--slot-guard", action="store_true", default=None, help="Hide labels when sampled slot pixels change after the overlay captures a baseline. Defaults to on with --auto-marker.")
     parser.add_argument("--no-slot-guard", action="store_false", dest="slot_guard")
+    parser.add_argument("--unsafe-no-slot-guard", action="store_true", help="Allow disabling slot guard in --auto-marker mode. Intended only for explicit troubleshooting.")
     parser.add_argument("--slot-guard-state", type=Path, help="Persistent slot-guard state file. Defaults to <search-root>/poe_stash_slot_guard_state.json.")
     parser.add_argument("--slot-guard-poll-ms", type=int, default=1000)
     parser.add_argument("--slot-guard-hide-labels-ms", type=float, default=0.0)
@@ -1777,6 +1778,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.slot_guard is None:
         args.slot_guard = bool(args.auto_marker)
+    elif args.auto_marker and args.slot_guard is False and not args.unsafe_no_slot_guard:
+        args.slot_guard = True
+        if args.debug_slot_guard:
+            print("slotGuard=forced-on auto-marker requires --unsafe-no-slot-guard to disable", file=sys.stderr)
     if args.singleton and not args.dry_run:
         stop_other_overlay_processes()
     entries = collect_entries(args)
