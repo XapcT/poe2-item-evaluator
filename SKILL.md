@@ -115,6 +115,11 @@ If PoB2 is missing or the headless adapter is not present, run `scripts/bootstra
      python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay.py" --latest --min-price-exalted 10 --window-title "Path of Exile"
      ```
      If the final answer adjusts raw market floors manually, save a curated `overlay_prices.json` in the evaluation directory and include rows such as `{"marker":"marker2","x":2,"y":0,"text":"2div","priceExalted":210,"labelRu":"..."}`. When `overlay_prices.json` exists, `--latest` uses it instead of raw report floors. Use `--marker marker1` or `--marker marker2` when only one marked tab is open.
+     If an overlay price is revised after a rough or earlier visible estimate, do not let the change stay only in files or in the overlay. Before the final user-facing answer, compare the previous and current overlay price files and explicitly report every large change, especially anything that changes by 2x or at least 1 divine. Use:
+     ```powershell
+     python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\audit_overlay_price_changes.py" --current "D:\Soft\PoE2_Build\<stash_eval_dir>\overlay_prices.json"
+     ```
+     This prints rows like `old -> new` with tab and in-game column/row. Include those rows in the final answer under a visible "Изменения цены" block before showing or restarting the overlay. If the user likely saw an older overlay label, treat the older label as the user-facing truth and state plainly that the price was raised.
      To switch and hide automatically while the user changes stash tabs, keep the marker tabs visible in the tab strip and run:
      ```powershell
      python "C:\Users\Hatzy\.codex\skills\poe2-item-evaluator\scripts\poe_stash_overlay.py" --latest --auto-marker --tab-marker marker2 --tab-marker marker1
@@ -200,6 +205,7 @@ If PoB2 is missing or the headless adapter is not present, run `scripts/bootstra
 - `scripts/list_character_skills.py`: reads a saved character JSON and prints a numbered target-skill menu, including non-support skills nested inside totems/meta setups and trigger-like support skills.
 - `scripts/rank_items.py`: parses copied PoE2 item text and ranks items with a transparent heuristic profile. Use for triage only.
 - `scripts/poe_stash_pricecheck.py`: fetches a marked public stash tab by account+marker price, filters by stash name, triages likely valuable items, and runs low-volume ordinary trade market-floor checks for a price threshold.
+- `scripts/audit_overlay_price_changes.py`: compares current `overlay_prices.json` against the newest backup or an explicit previous file and prints large `old -> new` sale-price changes that must be called out to the user.
 - `scripts/poe_stash_overlay.py`: reads saved stash price-check reports and draws a transparent, optionally click-through Windows overlay with compact price labels over the 12x12 stash grid. It also supports grid and tab-scan calibration; use the manager for normal activation.
 - `scripts/poe_stash_overlay_manager.py`: singleton user-facing overlay manager for calibration, one-time start, stop, status, and Windows autostart. Prefer this over direct overlay commands after stash evaluations.
 - `scripts/poe_ninja_build_finder.py`: decodes live poe.ninja PoE2 build search results, fetches matching character details, extracts common gear/keystone/passive patterns, compares them to a current character snapshot, and saves reference PoB exports/XML for exact PoB2 validation.
